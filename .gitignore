@@ -3,3 +3,7 @@ jupyter_notebooks/evals.ipynb
 jupyter_notebooks/runs.ipynb
 results2/
 data/*
+.DS_Store
+configs/.DS_Store
+scripts/__pycache__/
+jupyter_notebooks/__pycache__/
