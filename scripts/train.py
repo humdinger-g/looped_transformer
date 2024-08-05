@@ -10,7 +10,7 @@ from curriculum import Curriculum
 from schema import schema
 from models import build_model
 from tasks import get_task_sampler
-from main_utils import init_device, get_run_id, load_pretrained_model
+from main_utils import init_device, get_run_id, load_pretrained_model, get_best_preds
 # from eval import get_run_metrics
 
 
@@ -23,14 +23,17 @@ def calculate_gradient_norm(model):
     total_norm = 0.0
     norm_dict = {}
     for n, p in model.named_parameters():
-        param_norm = p.grad.data.norm(2)
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+        else:
+            param_norm = torch.tensor([0.])
         total_norm += param_norm.item() ** 2
         norm_dict[n] = param_norm
     total_norm = total_norm ** (1. / 2)
     return norm_dict, total_norm
 
 
-def train_step(args, curriculum, model, xs, ys, optimizer, ctx, scaler):
+def train_step(args, curriculum, model, xs, ys, optimizer, ctx, scaler, ys_pred=None):
     if args.model.family in ['gpt2', 'gpt2_tying']:
         if ctx is not None:
             with ctx:
@@ -41,7 +44,7 @@ def train_step(args, curriculum, model, xs, ys, optimizer, ctx, scaler):
             y_pred = model(xs, ys, add_inputs_embeds=args.training.add_inputs_embeds)  # [B, n]
             # list of [B, n], length K + 1, get rid of the 0-th one
             loss = (ys - y_pred).square().mean()  # auto on both K and n (number of in context samples)
-    elif args.model.family in ['gpt2_loop']:
+    elif args.model.family in ['gpt2_loop', 'gpt2_loop_parallel']:
         n_loops = curriculum.n_loops  # K
         if ctx is not None:
             with ctx:
@@ -49,7 +52,12 @@ def train_step(args, curriculum, model, xs, ys, optimizer, ctx, scaler):
                 y_pred_list = model(xs, ys, horizon_start, n_loops)
                 # list of [B, n], length K
                 y_pred_arr = torch.cat(y_pred_list, dim=0)  # [B * K, n]
-                y_star_arr = torch.cat([ys] * len(y_pred_list), dim=0)  # [B * K, n]
+
+                # teacher forcing if there are different targets for each iteration
+                if ys_pred:
+                    y_star_arr = ys_pred.flatten(end_dim=-2)
+                else:
+                    y_star_arr = torch.cat([ys] * len(y_pred_list), dim=0)  # [B * K, n]
                 loss = (y_star_arr - y_pred_arr).square().mean()  # auto on both K and n (number of in context samples)
                 y_pred = y_pred_list[-1]  # [B, n]
         else:
@@ -149,7 +157,11 @@ def main(args, device):
             real_task = task_sampler()
             xs, ys = real_task.xs.float(), real_task.ys.float()
 
-        loss, output, total_norm, grad_norm_dict = train_step(args, curriculum, model, xs, ys, optimizer, ctx, scaler)
+        if args.training.teacher_forcing:
+            ys_pred = get_best_preds(xs, ys, epochs=args.training.n_loop_window)
+            loss, output, total_norm, grad_norm_dict = train_step(args, curriculum, model, xs, ys, optimizer, ctx, scaler, ys_pred=ys_pred)
+        else:
+            loss, output, total_norm, grad_norm_dict = train_step(args, curriculum, model, xs, ys, optimizer, ctx, scaler)
 
         # EVALUATION ======================================
         point_wise_tags = list(range(curriculum.n_points))  # [0, 1, 2, ..., n-1]
@@ -170,9 +182,12 @@ def main(args, device):
                             raise NotImplementedError
                         point_wise_loss = (output - ys).square().mean(dim=0)
                         loss = point_wise_loss.mean()
+                        print(point_wise_loss.shape)
+                        #icl_score = point_wise_loss[-2] - point_wise_loss[3]
             wandb.log(
                 {
                     "overall_loss": loss,
+                    "icl_score": (point_wise_loss[-2] - point_wise_loss[3]).detach(),
                     "loop_times": curriculum.n_loops,
                     "grad_norm/layerwise": grad_norm_dict,
                     "grad_norm": total_norm,

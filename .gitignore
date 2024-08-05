@@ -1,0 +1,5 @@
+jupyter_notebooks/pycache/
+jupyter_notebooks/evals.ipynb
+jupyter_notebooks/runs.ipynb
+results2/
+data/*

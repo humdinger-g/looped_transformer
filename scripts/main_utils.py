@@ -2,6 +2,7 @@ import torch
 import datetime
 import uuid
 import os
+import numpy as np
 from torch.utils.data import Dataset
 
 
@@ -104,3 +105,120 @@ def get_run_id(args):
     run_id = "{}-{}-".format(now, args.wandb.name) + str(uuid.uuid4())[:4]
     return run_id
 
+
+def combine(xs_b, ys_b):
+    """
+    :param xs_b: shape [B, n, d_in]
+    :param ys_b: shape [B, n]
+    :return: shape [B, 2n, d_in + 1]
+    """
+    freq = 2
+    B, n, d = xs_b.shape
+    device = xs_b.device
+
+    ys_b_wide = torch.cat(
+        (
+            ys_b.view(B, n, 1),
+            torch.zeros(B, n, d-1, device=device),
+        ),
+        axis=2,
+    )
+
+    zs = torch.stack((xs_b, ys_b_wide), dim=2)
+    zs = zs.view(B, freq * n, d)
+
+    return zs
+
+
+def sample_pairs_separate(xs: torch.Tensor,
+                 ys: torch.Tensor,
+                 alpha: float = 0.5,
+                 last: bool = False) -> torch.Tensor:
+    """
+    takes input prompt P of pairs (x, y) and leaves
+    random ratio alpha of them
+
+    Args:
+        xs (torch.Tensor): tensor of x values of shape [B, n, d]
+        ys (torch.Tensor): tensor of y values of shape [B, n, d]
+        alpha (float): ratio of pairs to sample. Defaults to 0.5
+        last (bool): if True, samlpes last examples. Defaults to False
+
+    Returns:
+        torch.Tensor: samples from input embeds of shape [B, 2*int(n*alpha), d]
+    """
+    B, n, d = xs.shape
+    num = n // 2
+    if last:
+        idx = np.arange(num)[-int(num*alpha):]
+    else:
+        idx = np.random.choice(num, size=int(num*alpha), replace=False)
+
+    new_xs = xs[:,idx,:]
+    new_ys = ys[:,idx]
+
+    return new_xs, new_ys
+
+
+def sample_inputs(embeds: torch.Tensor,
+                 alpha: float = 0.5,
+                 last: bool = False) -> torch.Tensor:
+    """
+    takes input prompt P of pairs (x, y) and leaves
+    random ratio alpha of them
+
+    Args:
+        embeds (torch.Tensor): input tensor of shape [B, 2n, d]
+        alpha (float): ratio of pairs to sample. Defaults to 0.5
+        last (bool): if True, samlpes last examples. Defaults to False
+
+    Returns:
+        torch.Tensor: samples from input embeds of shape [B, 2*int(n*alpha), d]
+    """
+    B, n, d = embeds.shape
+    num = n // 2
+    if last:
+        idx = np.arange(num)[-int(num*alpha):]
+    else:
+        idx = np.random.choice(num, size=int(num*alpha), replace=False)
+
+    # new_xs = embeds[:,0::2,:][:,idx,:]
+    # new_ys = embeds[:,1::2,:][:,idx,:]
+
+    # new_embeds = torch.zeros(B, int(2*num*alpha), d)
+    # new_embeds[:,0::2,:] = new_xs
+    # new_embeds[:,1::2,:] = new_ys
+    mask = torch.zeros_like(embeds)
+    mask[:, 2*idx, :] = 1
+    mask[:, 2*idx+1, :] = 1
+    mask = mask != 1
+    return torch.masked_fill(embeds, mask, 0)
+
+
+def iterative_regression(xs, ys, lr=0.001, epochs=30):
+    weights, outs = [], []
+    w = torch.randn((xs.shape[1], 1)).to(xs.device)
+    for i in range(epochs):
+        w -= lr * xs.T @ (xs @ w - ys.unsqueeze(-1))
+        outs += [(xs @ w).squeeze(-1)]
+    
+    err = (outs[-1] - ys.unsqueeze(0)).square().mean().item()
+
+    return torch.stack(outs), err
+
+def get_best_preds(xs, ys, LR=np.logspace(-5, -1, base=10, num=30), epochs=30):
+    all_outs = []
+    best_lrs = [] ###
+    for i in range(xs.shape[0]):
+        err = float('inf')
+        outs = []
+        for lr in LR:
+            cur_outs, cur_err = iterative_regression(xs[i], ys[i], lr=lr, epochs=epochs)
+            if cur_err < err:
+                outs = cur_outs
+                best_lr = lr
+
+        all_outs += [outs]
+        best_lrs += [best_lr]
+    
+    return torch.stack(all_outs), best_lrs

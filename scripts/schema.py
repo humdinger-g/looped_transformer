@@ -20,7 +20,7 @@ gpu_schema = {
 }
 
 model_schema = {
-    "family": merge(tstring, allowed(["gpt2", "gpt2_loop", "gpt2_tying"])),
+    "family": merge(tstring, allowed(["gpt2", "gpt2_loop", "gpt2_tying", "gpt2_loop_parallel"])),
     "n_positions": merge(tinteger, required),  # maximum context length
     "n_dims": merge(tinteger, required),  # latent dimension
     "n_embd": merge(tinteger, required),
@@ -30,6 +30,13 @@ model_schema = {
     "pretrained_path": merge(tstring, nullable, default(None)),
     "loop_func": merge(tstring, default("z=f(x+z)"), allowed(
         ["z=f(x+z)", "z=f(x*z)"])),
+    "minimal": merge(tboolean, default(True)),
+    "decay": merge(tstring, default("none")),
+    "S": merge(tinteger, default(1)),
+    "ssm": merge(tboolean, default(False)),
+    "ssm_dstate": merge(tinteger, default(16)),
+    "ssm_dconv": merge(tinteger, default(4)),
+    "ssm_expand": merge(tinteger, default(2))
 }
 
 curriculum_base_schema = {
@@ -64,6 +71,7 @@ training_schema = {
     "sparsity": merge(tinteger, default(100)),
     "add_inputs_embeds": merge(tboolean, default(False)),
     "test_idx": merge(tinteger, default(-1)),  # openML dataset
+    "teacher_forcing": merge(tboolean, default(False))
 }
 
 wandb_schema = {

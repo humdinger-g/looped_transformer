@@ -1,12 +1,14 @@
 import torch
 import torch.nn as nn
-from transformers import GPT2Model, GPT2Config
+from nano_gpt import GPT2Model, GPT2Config
 from tqdm import tqdm
+import numpy as np
 from sklearn.svm import LinearSVC
 from sklearn.linear_model import LogisticRegression, Lasso, Ridge
+from scripts.tasks import LinearRegression
 import warnings
 from sklearn import tree
-import xgboost as xgb
+#import xgboost as xgb
 
 import os
 
@@ -86,6 +88,9 @@ def eval_looped_model(model, xs, ys, loop_max):
             xs_train = xs[batch_idx * batch_size: (batch_idx + 1) * batch_size]
             ys_train = ys[batch_idx * batch_size: (batch_idx + 1) * batch_size]
             y_pred_list = model(xs_train, ys_train, 0, loop_max)  # list of [B, n], length T
+            if len(y_pred_list) == 1:
+                y_pred_list = y_pred_list[0]
+
             y_pred_total[batch_idx * batch_size: (batch_idx + 1) * batch_size] = y_pred_list[-1].detach()
             tmp_list = [y_pred[:, [-1]] for y_pred in y_pred_list]  # list of [B, 1], length T
             tmp_arry = torch.cat(tmp_list, dim=1)  # [B, T]
@@ -634,3 +639,120 @@ class XGBoostModel:
             preds.append(pred)
 
         return torch.stack(preds, dim=1)
+    
+def combine(xs_b, ys_b):
+    """
+    :param xs_b: shape [B, n, d_in]
+    :param ys_b: shape [B, n]
+    :return: shape [B, 2n, d_in + 1]
+    """
+    freq = 2
+    B, n, d = xs_b.shape
+    device = xs_b.device
+
+    ys_b_wide = torch.cat(
+        (
+            ys_b.view(B, n, 1),
+            torch.zeros(B, n, d-1, device=device),
+        ),
+        axis=2,
+    )
+
+    zs = torch.stack((xs_b, ys_b_wide), dim=2)
+    zs = zs.view(B, freq * n, d)
+
+    return zs
+    
+
+def similarity_sort(xs, ys):
+    idx = np.argsort(torch.cosine_similarity(xs[:,:-1,:], xs[:, [-1], :], dim=-1))
+    idx_expanded = idx.unsqueeze(2).expand(-1, -1, xs[:,:-1,:].size(2))
+
+    sorted_xs = torch.gather(xs[:,:-1,:], 1, idx_expanded)
+    new_xs = torch.cat((sorted_xs, xs[:,[-1],:]), dim=1)
+
+    sorted_ys = torch.gather(ys[:,:-1], 1, idx)
+    new_ys = torch.cat((sorted_ys, ys[:,[-1]]), dim=1)
+
+    return new_xs, new_ys
+
+def create_repeated_sequence(d, k, n):
+    real_task = LinearRegression(batch_size=1, 
+                                 n_points=k, 
+                                 n_dims=d, 
+                                 n_dims_truncated=d, 
+                                 device='cpu')
+    xs, ys = real_task.xs, real_task.ys
+    xs = xs.squeeze(0).repeat(n, 1).unsqueeze(0)
+    ys = ys.squeeze(0).repeat(n, 1).unsqueeze(0)
+    return xs, ys
+
+def get_attention_weights(inputs, model):
+    batch_size, seq_length, embed_dim = inputs.size()
+    num_heads = model.configuration.n_head
+    
+    qkv = model._backbone.transformer.h[0].attn.c_attn(inputs)  # (batch_size, sequence_length, 3 * embed_dim)
+    
+    head_dim = embed_dim // num_heads
+    qkv = qkv.view(batch_size, seq_length, 3, num_heads, head_dim)
+    q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+    
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    
+    attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (head_dim ** 0.5)  # (B, h, n, n)
+    
+    mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).to(inputs.device)
+    attn_scores = attn_scores.masked_fill(mask == 1, float('-inf'))
+    
+    attn_weights = nn.functional.softmax(attn_scores, dim=-1)
+    
+    return attn_weights
+
+
+def get_prefix_matching_scores(A, k, n):
+    mean_values = []
+    A_new = A[::2, 1::2] #rows are xs, columns are ys
+    for i in range(len(A_new)):
+        x_number = i % k
+        mean_values += [A_new[i, x_number::k].mean().item()]
+
+    final_mean_values = []
+    for i in range(k):
+        final_mean_values += [np.mean(mean_values[i::k])]
+
+    return final_mean_values
+
+
+def get_prefix_matching_score(A, k, n):
+    A_new = A[::2, 1::2]
+    self_attentions = []
+    for i in range(len(A_new)):
+        x_number = i % k
+        self_attentions += [A_new[i, x_number::k]]
+    final_scores = []
+    for i in range(k):
+        rows = self_attentions[i::k]
+        rows = torch.hstack([row[row > 0] for row in rows])
+        final_scores += [rows.mean()]
+    return np.mean(final_scores)
+
+def prefix_matching(model, k, n, max_loops=20):
+    """Generates a sequence (x_i, f(x_i)) of length k repeated n times
+    returns a matrix of size (max_loops+1, n_head) where (i,j) values
+    shows the prefix matching score of the specific head: average attention score
+    of x_i to all the previous y_i
+    """
+    xs, ys = create_repeated_sequence(d=20, k=k, n=n)
+    _, hidden_states = model(xs, ys, 0, max_loops, return_hidden_states=True)
+    embeds = model._read_in(combine(xs, ys))
+    hidden_states = [embeds] + hidden_states
+    all_attentions = []
+    prefix_matching_scores = np.zeros((max_loops+1, model.configuration.n_head))
+    for i, x in enumerate(hidden_states):
+        attn = get_attention_weights(x, model).squeeze(0)
+        all_attentions += [attn]
+        for j, head in enumerate(attn):
+            prefix_matching_scores[i, j] = get_prefix_matching_score(head.detach(), k, n)
+
+    return prefix_matching_scores

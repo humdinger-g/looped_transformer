@@ -1,7 +1,6 @@
-# Looped Transformers are Better at Learning Learning Algorithms
-Liu Yang, Kangwook Lee, Robert D. Nowak, Dimitris Papailiopoulos 
+# Looped Transformer
 
-You can find the paper in [arxiv](https://arxiv.org/abs/2311.12424).
+This is a research project that is based on the paper [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/abs/2311.12424). You can find the detailed report [here](https://knowing-racer-d3e.notion.site/Report-14a97eaf9e3b40a69f5cb2be98d13540?pvs=4)
 
 ## Overview
 

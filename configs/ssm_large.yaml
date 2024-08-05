@@ -1,5 +1,5 @@
 wandb:
-    project: Lets_Loop2
+    project: Lets_Loop_ssm
     notes:
     log_every_steps: 100
 
@@ -7,38 +7,44 @@ gpu:
     cuda: True
 
 model:
-    family: gpt2
-    n_embd: 256
-    n_layer: 12
+    family: gpt2_loop
+    n_embd: 128
+    n_layer: 1
     n_head: 8
     n_dims: 20
     n_positions: 101
+    minimal: False
+    ssm: True
+    ssm_dstate: 32
+    ssm_dconv: 8
+    ssm_expand: 4
 
 training:
     batch_size: 64
     task_name: linear_regression
     learning_rate: 0.0001
     weight_decay: 0.0
-    train_steps: 500000
+    train_steps: 100000
     save_every_steps: 1000
     keep_every_steps: 100000
     curriculum:
         dims:
-            start: 5
+            start: 20
             end: 20
             inc: 1
             interval: 5000
         points:
-            start: 11
+            start: 41
             end: 41
             inc: 2
-            interval: 5000
+            interval: 1000
         loops:
-            start: 1
-            end: 1
+            start: 20
+            end: 50
             inc: 2
             interval: 500
     n_loop_window: 20
+    teacher_forcing: False
 
-out_dir: ./results2/linear_regression_baseline
+out_dir: ./results2/linear_regression_loop
 debug_mode: False
