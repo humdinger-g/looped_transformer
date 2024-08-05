@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-#from mamba_ssm import Mamba
+from mamba_ssm import Mamba
 
 
 
@@ -115,7 +115,7 @@ class Block(nn.Module):
         super().__init__()
         config.ssm = False
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)  if not config.minimal else nn.Identity()
-        self.attn = CausalSelfAttention(config) if not config.ssm else MambaBlock(dim=config.n_embd,
+        self.attn = CausalSelfAttention(config) if not config.ssm else Mamba(d_model=config.n_embd,
                                                                             d_state=config.ssm_dstate,
                                                                             d_conv=config.ssm_dconv,
                                                                             expand=config.ssm_expand).to('cuda')

@@ -14,6 +14,9 @@ model:
     n_dims: 20
     n_positions: 101
     S: 1
+    minimal: False
+    ssm: False
+    decay: 'seq'
 
 training:
     batch_size: 64
@@ -40,7 +43,7 @@ training:
             inc: 2
             interval: 500
     n_loop_window: 20
-    teacher_forcing: True
+    teacher_forcing: False
 
 out_dir: ./results2/linear_regression_loop
 debug_mode: False
