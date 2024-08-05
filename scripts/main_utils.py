@@ -222,3 +222,15 @@ def get_best_preds(xs, ys, LR=np.logspace(-5, -1, base=10, num=30), epochs=30):
         best_lrs += [best_lr]
     
     return torch.stack(all_outs), best_lrs
+
+def similarity_sort(xs, ys):
+    idx = np.argsort(torch.cosine_similarity(xs[:,:-1,:], xs[:, [-1], :], dim=-1))
+    idx_expanded = idx.unsqueeze(2).expand(-1, -1, xs[:,:-1,:].size(2))
+
+    sorted_xs = torch.gather(xs[:,:-1,:], 1, idx_expanded)
+    new_xs = torch.cat((sorted_xs, xs[:,[-1],:]), dim=1)
+
+    sorted_ys = torch.gather(ys[:,:-1], 1, idx)
+    new_ys = torch.cat((sorted_ys, ys[:,[-1]]), dim=1)
+
+    return new_xs, new_ys

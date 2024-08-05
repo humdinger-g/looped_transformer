@@ -16,8 +16,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+#from mamba_ssm import Mamba
 
-from mamba_ssm import Mamba
 
 
 # @torch.jit.script # good to enable when not using torch.compile, disable when using (our default)
@@ -66,7 +66,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                  .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x, cross_input=None, attn_mask=None, return_attn=False):
+    def forward(self, x, cross_input=None, attn_mask=None):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -76,24 +76,20 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if not return_attn and self.flash:
+        if self.flash:
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=None, dropout_p=self.dropout, is_causal=True)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            mask = torch.triu(torch.ones(1, 1, T, T), diagonal=1).to(x.device)
-            att = att.masked_fill(mask[:, :, :T, :T] == 1, float('-inf'))
-            #att = att.masked_fill(self.bias[:, :, :T, :T] == 1, float('-inf'))
+            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
         # output projection
         y = self.resid_dropout(self.c_proj(y))
-        if return_attn:
-            return y, att
         return y
 
 
@@ -117,26 +113,19 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias) if not config.minimal else nn.Identity()
-        self.attn = CausalSelfAttention(config) if not config.ssm else Mamba(
-                                                                            d_model=config.n_embd,
+        config.ssm = False
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)  if not config.minimal else nn.Identity()
+        self.attn = CausalSelfAttention(config) if not config.ssm else MambaBlock(dim=config.n_embd,
                                                                             d_state=config.ssm_dstate,
                                                                             d_conv=config.ssm_dconv,
-                                                                            expand=config.ssm_expand)
-
+                                                                            expand=config.ssm_expand).to('cuda')
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias) if not config.minimal else nn.Identity()
         self.mlp = MLP(config) if not config.minimal else nn.Identity()
 
-    def forward(self, x, return_attn=False):
-        #x = x + self.attn(self.ln_1(x), return_attn=return_attn)
-        out = self.attn(self.ln_1(x), return_attn=return_attn)
-        if return_attn:
-            out, att = out
-            x = x + out
-        else:
-            x = x + out
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
-        return x if not return_attn else (x, att)
+        return x
 
 
 @dataclass
@@ -149,7 +138,7 @@ class GPT2Config:
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     minimal: bool = True
-    decay: str = 'None'
+    decay: str = 'none'
     ssm: bool = False
     ssm_dstate: int = 16
     ssm_dconv: int = 4
@@ -205,9 +194,7 @@ class GPT2Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, inputs_embeds, position_ids=None, rm_pos_embd=False, 
-                add_inputs_embeds=False, output_intermediate=False,
-                return_attn=False):
+    def forward(self, inputs_embeds, position_ids=None, rm_pos_embd=False, add_inputs_embeds=False, output_intermediate=False):
         device = inputs_embeds.device
         b, t, d = inputs_embeds.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -216,7 +203,6 @@ class GPT2Model(nn.Module):
         if output_intermediate:
             embeds = [inputs_embeds]
 
-        all_attentions = []
         # forward the GPT model itself
         # tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(position_ids)  # position embeddings of shape (1, t, n_embd)
@@ -227,16 +213,11 @@ class GPT2Model(nn.Module):
             if add_inputs_embeds:
                 x = block(x + inputs_embeds)
             else:
-                x = block(x, return_attn=return_attn)
-                if return_attn:
-                    x, att = x
-                    all_attentions += [att]
+                x = block(x)
             if output_intermediate:
                 embeds.append(x)
         x = self.transformer.ln_f(x)
         if output_intermediate:
             return x, embeds
-        if return_attn:
-            return x, all_attentions
 
         return x
